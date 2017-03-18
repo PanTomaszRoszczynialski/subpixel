@@ -2,10 +2,10 @@ from __future__ import division
 import os
 import time
 from glob import glob
+from subpixel import PS
 import tensorflow as tf
 from six.moves import xrange
 from scipy.misc import imresize
-from subpixel import PS
 
 from ops import *
 from utils import *
@@ -58,27 +58,38 @@ class DCGAN(object):
         self.build_model()
 
     def build_model(self):
-
-        self.inputs = tf.placeholder(tf.float32, [self.batch_size, self.input_size, self.input_size, 3],
-                                    name='real_images')
+        """ Make graph """
+        in_shape =  [self.batch_size, self.input_size, self.input_size, 3]
+        self.inputs = tf.placeholder(tf.float32,
+                                     in_shape,
+                                     name='real_images')
         try:
-            self.up_inputs = tf.image.resize_images(self.inputs, self.image_shape[0], self.image_shape[1], tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+            self.up_inputs = tf.image.resize_images(self.inputs,
+                                                    self.image_shape[0],
+                                                    self.image_shape[1],
+                                                    tf.image.ResizeMethod.NEAREST_NEIGHBOR)
         except ValueError:
+            print 'Come check me up'
             # newer versions of tensorflow
-            self.up_inputs = tf.image.resize_images(self.inputs, [self.image_shape[0], self.image_shape[1]], tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+            self.up_inputs = tf.image.resize_images(self.inputs,
+                                                    [self.image_shape[0], self.image_shape[1]],
+                                                    tf.image.ResizeMethod.NEAREST_NEIGHBOR)
 
-        self.images = tf.placeholder(tf.float32, [self.batch_size] + self.image_shape,
+        self.images = tf.placeholder(tf.float32,
+                                    [self.batch_size] + self.image_shape,
                                     name='real_images')
-        self.sample_images= tf.placeholder(tf.float32, [self.sample_size] + self.image_shape,
-                                        name='sample_images')
+        self.sample_images= tf.placeholder(tf.float32,
+                                           [self.sample_size] + self.image_shape,
+                                           name='sample_images')
 
+        # SubPixeling happens here
         self.G = self.generator(self.inputs)
 
-        self.G_sum = tf.image_summary("G", self.G)
+        self.G_sum = tf.summary.image("G", self.G)
 
         self.g_loss = tf.reduce_mean(tf.square(self.images-self.G))
 
-        self.g_loss_sum = tf.scalar_summary("g_loss", self.g_loss)
+        self.g_loss_sum = tf.summary.scalar("g_loss", self.g_loss)
 
         t_vars = tf.trainable_variables()
 
@@ -87,17 +98,21 @@ class DCGAN(object):
         self.saver = tf.train.Saver()
 
     def train(self, config):
-        """Train DCGAN"""
+        """ Train DCGAN """
         # first setup validation data
-        data = sorted(glob(os.path.join("./data", config.dataset, "valid", "*.jpg")))
+        data = sorted(glob(os.path.join("data", config.dataset, "valid", "*.jpg")))
+        print 'Data:', data
 
-        g_optim = tf.train.AdamOptimizer(config.learning_rate, beta1=config.beta1) \
-                          .minimize(self.g_loss, var_list=self.g_vars)
+        g_optim = tf.train.AdamOptimizer(config.learning_rate,
+                                         beta1=config.beta1) \
+                          .minimize(self.g_loss,
+                                    var_list=self.g_vars)
+
         tf.initialize_all_variables().run()
 
         self.saver = tf.train.Saver()
-        self.g_sum = tf.merge_summary([self.G_sum, self.g_loss_sum])
-        self.writer = tf.train.SummaryWriter("./logs", self.sess.graph)
+        self.g_sum = tf.summary.merge([self.G_sum, self.g_loss_sum])
+        self.writer = tf.summary.FileWriter("logs", self.sess.graph)
 
         sample_files = data[0:self.sample_size]
         sample = [get_image(sample_file, self.image_size, is_crop=self.is_crop) for sample_file in sample_files]
@@ -130,9 +145,12 @@ class DCGAN(object):
                 batch_images = np.array(batch).astype(np.float32)
                 batch_inputs = np.array(input_batch).astype(np.float32)
 
-                # Update G network
-                _, summary_str, errG = self.sess.run([g_optim, self.g_sum, self.g_loss],
-                    feed_dict={ self.inputs: batch_inputs, self.images: batch_images })
+                # Prepare training ops
+                t_ops = [g_optim, self.g_sum, self.g_loss]
+                t_fd = { self.inputs: batch_inputs, self.images: batch_images }
+
+                # Tensorboard summaries
+                _, summary_str, errG = self.sess.run(t_ops, feed_dict = t_fd)
                 self.writer.add_summary(summary_str, counter)
 
                 counter += 1
@@ -140,31 +158,59 @@ class DCGAN(object):
                     % (epoch, idx, batch_idxs,
                         time.time() - start_time, errG))
 
+                # Validate sometimes
                 if np.mod(counter, 100) == 1:
-                    samples, g_loss, up_inputs = self.sess.run(
-                        [self.G, self.g_loss, self.up_inputs],
-                        feed_dict={self.inputs: sample_input_images, self.images: sample_images}
-                    )
+                    # Prepare validation ops
+                    v_ops = [self.G, self.g_loss, self.up_inputs]
+                    # Prepare data
+                    v_fd = {self.inputs: sample_input_images, self.images: sample_images}
+                    # Execute graph
+                    samples, g_loss, up_inputs = self.sess.run(v_ops, feed_dict = v_fd)
                     if not have_saved_inputs:
                         save_images(up_inputs, [8, 8], './samples/inputs.png')
                         have_saved_inputs = True
-                    save_images(samples, [8, 8],
-                                './samples/valid_%s_%s.png' % (epoch, idx))
+
+                    # Save something
+                    savepath = './samples/valid_%s_%s.png' % (epoch, idx)
+                    save_images(samples, [8, 8], savepath)
                     print("[Sample] g_loss: %.8f" % (g_loss))
 
                 if np.mod(counter, 500) == 2:
                     self.save(config.checkpoint_dir, counter)
 
     def generator(self, z):
+        """ Super resolutionate the input """
         # project `z` and reshape
-        self.h0, self.h0_w, self.h0_b = deconv2d(z, [self.batch_size, 32, 32, self.gf_dim], k_h=1, k_w=1, d_h=1, d_w=1, name='g_h0', with_w=True)
+        self.h0, self.h0_w, self.h0_b = deconv2d(z,
+                                                 [self.batch_size, 32, 32, self.gf_dim],
+                                                 k_h=1,
+                                                 k_w=1,
+                                                 d_h=1,
+                                                 d_w=1,
+                                                 name='g_h0',
+                                                 with_w=True)
         h0 = lrelu(self.h0)
+        print 'h0:', h0.get_shape().as_list()
 
-        self.h1, self.h1_w, self.h1_b = deconv2d(h0, [self.batch_size, 32, 32, self.gf_dim], name='g_h1', d_h=1, d_w=1, with_w=True)
+        self.h1, self.h1_w, self.h1_b = deconv2d(h0,
+                                                 [self.batch_size, 32, 32, self.gf_dim],
+                                                 name='g_h1',
+                                                 d_h=1,
+                                                 d_w=1,
+                                                 with_w=True)
         h1 = lrelu(self.h1)
+        print 'h1:', h1.get_shape().as_list()
 
-        h2, self.h2_w, self.h2_b = deconv2d(h1, [self.batch_size, 32, 32, 3*16], d_h=1, d_w=1, name='g_h2', with_w=True)
+        h2, self.h2_w, self.h2_b = deconv2d(h1,
+                                            [self.batch_size, 32, 32, 3*16],
+                                            d_h=1,
+                                            d_w=1,
+                                            name='g_h2',
+                                            with_w=True)
+        print 'h2:', h2.get_shape().as_list()
+
         h2 = PS(h2, 4, color=True)
+        print 'h2.PS:', h2.get_shape().as_list()
 
         return tf.nn.tanh(h2)
 

@@ -38,6 +38,7 @@ def main(_):
             dcgan = DCGAN(sess, image_size=FLAGS.image_size, batch_size=FLAGS.batch_size,
                     dataset_name=FLAGS.dataset, is_crop=FLAGS.is_crop, checkpoint_dir=FLAGS.checkpoint_dir)
 
+        FLAGS.is_train = True
         if FLAGS.is_train:
             dcgan.train(FLAGS)
         else:
